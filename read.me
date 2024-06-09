@@ -1,0 +1,231 @@
+Step 1: Setting Up the Node.js App
+
+First, create a simple "Hello World" Node.js application.
+
+Create a new directory for your project:
+
+mkdir hello-world-nodejs
+cd hello-world-nodejs
+
+Initialize a new Node.js project:
+
+npm init -y
+
+Create an index.js file:
+
+const http = require('http');
+
+const hostname = '0.0.0.0';
+const port = 3000;
+
+const server = http.createServer((req, res) => {
+  res.statusCode = 200;
+  res.setHeader('Content-Type', 'text/plain');
+  res.end('Hello, World!\n');
+});
+
+server.listen(port, hostname, () => {
+  console.log(`Server running at http://${hostname}:${port}/`);
+});
+
+Create a Dockerfile:
+
+FROM node:14
+
+WORKDIR /usr/src/app
+
+COPY package*.json ./
+
+RUN npm install
+
+COPY . .
+
+EXPOSE 3000
+
+CMD ["node", "index.js"]
+
+Test the application locally:
+
+docker build -t hello-world-nodejs .
+docker run -p 3000:3000 hello-world-nodejs
+
+Step 2: Create a Public GitHub Repository
+
+Go to GitHub and create a new public repository named hello-world-nodejs.
+
+Push your local Node.js application code to this repository.
+
+Step 3: Terraform Configuration
+
+Create a new directory named terraform in your project to hold the Terraform configuration files.
+
+Create a main.tf file:
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+resource "aws_vpc" "main" {
+  cidr_block = "10.0.0.0/16"
+}
+
+resource "aws_subnet" "subnet" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.1.0/24"
+  availability_zone = "us-east-1a"
+}
+
+resource "aws_security_group" "sg" {
+  vpc_id = aws_vpc.main.id
+
+  ingress {
+    from_port   = 3000
+    to_port     = 3000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_ecr_repository" "repo" {
+  name = "hello-world-nodejs"
+}
+
+resource "aws_ecs_cluster" "cluster" {
+  name = "hello-world-cluster"
+}
+
+resource "aws_ecs_task_definition" "task" {
+  family                   = "hello-world-task"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+
+  container_definitions = jsonencode([
+    {
+      name      = "hello-world-nodejs"
+      image     = "${aws_ecr_repository.repo.repository_url}:latest"
+      essential = true
+      portMappings = [
+        {
+          containerPort = 3000
+          hostPort      = 3000
+        }
+      ]
+    }
+  ])
+
+  execution_role_arn = aws_iam_role.ecs_task_execution_role.arn
+}
+
+resource "aws_ecs_service" "service" {
+  name            = "hello-world-service"
+  cluster         = aws_ecs_cluster.cluster.id
+  task_definition = aws_ecs_task_definition.task.arn
+  desired_count   = 1
+
+  network_configuration {
+    subnets         = [aws_subnet.subnet.id]
+    security_groups = [aws_security_group.sg.id]
+    assign_public_ip = true
+  }
+}
+
+resource "aws_iam_role" "ecs_task_execution_role" {
+  name = "ecs_task_execution_role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  inline_policy {
+    name = "ecs_task_execution_policy"
+    policy = jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        {
+          Action = [
+            "ecr:GetDownloadUrlForLayer",
+            "ecr:BatchGetImage",
+            "ecr:BatchCheckLayerAvailability",
+            "logs:CreateLogStream",
+            "logs:PutLogEvents"
+          ]
+          Effect   = "Allow"
+          Resource = "*"
+        }
+      ]
+    })
+  }
+}
+
+Initialize Terraform:
+
+terraform init
+
+Apply the configuration:
+
+terraform apply
+
+Step 4: CI/CD Pipeline with GitHub Actions
+
+Create a .github/workflows directory in your project.
+
+Create a deploy.yml file in the .github/workflows directory:
+
+name: Deploy to AWS
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+        with:
+          region: us-east-1
+
+      - name: Build and push image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: hello-world-nodejs
+          IMAGE_TAG: latest
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+      - name: Update ECS service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: hello-world-task
+          service: hello-world-service
+          cluster: hello-world-cluster
+          wait-for-service-stability: true
